@@ -1,0 +1,249 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+  @@unique([identifier, token])
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  password      String?
+  phone         String?
+  role          Role      @default(USER)
+  tokensUsed    Int       @default(0)
+  monthlyLimit  Int       @default(10000)
+  lastResetDate DateTime  @default(now())
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts      Account[]
+  sessions      Session[]
+  bookings      Booking[]
+  ownedTurfs    Turf[]          @relation("TurfOwner")
+  messages      ChatMessage[]
+  subscription  OwnerSubscription?
+}
+
+enum Role {
+  USER
+  OWNER
+  ADMIN
+}
+
+model OwnerSubscription {
+  id               String             @id @default(cuid())
+  userId           String             @unique
+  user             User               @relation(fields: [userId], references: [id])
+  status           SubscriptionStatus @default(TRIAL)
+  trialStartDate   DateTime           @default(now())
+  trialEndDate     DateTime
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  razorpayOrderId  String?
+  razorpayPaymentId String?
+  amount           Int                @default(300)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  payments         SubscriptionPayment[]
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+model SubscriptionPayment {
+  id             String   @id @default(cuid())
+  subscriptionId String
+  subscription   OwnerSubscription @relation(fields: [subscriptionId], references: [id])
+  razorpayOrderId  String?
+  razorpayPaymentId String?
+  amount         Int
+  status         String   @default("PENDING")
+  periodStart    DateTime
+  periodEnd      DateTime
+  createdAt      DateTime @default(now())
+}
+
+model Turf {
+  id           String   @id @default(cuid())
+  name         String
+  description  String
+  location     String
+  address      String
+  city         String
+  sport        Sport[]
+  pricePerHour Float
+  images       String[]
+  amenities    String[]
+  openTime     String
+  closeTime    String
+  isActive     Boolean  @default(true)
+  isFeatured   Boolean  @default(false)
+  ownerId      String
+  owner        User     @relation("TurfOwner", fields: [ownerId], references: [id])
+  ownerPhone   String?
+  ownerEmail   String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  bookings  Booking[]
+  slots     TimeSlot[]
+  coupons   Coupon[]
+}
+
+enum Sport {
+  FOOTBALL
+  CRICKET
+  BASKETBALL
+}
+
+model Coupon {
+  id              String      @id @default(cuid())
+  code            String      @unique
+  turfId          String
+  turf            Turf        @relation(fields: [turfId], references: [id])
+  discountType    DiscountType @default(PERCENTAGE)
+  discountValue   Float
+  maxUses         Int         @default(100)
+  usedCount       Int         @default(0)
+  minBookingHours Int         @default(1)
+  validFrom       DateTime    @default(now())
+  validUntil      DateTime
+  isActive        Boolean     @default(true)
+  createdAt       DateTime    @default(now())
+  bookings        Booking[]
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+model TimeSlot {
+  id        String   @id @default(cuid())
+  turfId    String
+  turf      Turf     @relation(fields: [turfId], references: [id])
+  date      DateTime @db.Date
+  startTime String
+  endTime   String
+  isBooked  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  booking   Booking?
+
+  @@index([turfId, date])
+  @@index([turfId, date, startTime])
+}
+
+model Booking {
+  id              String        @id @default(cuid())
+  userId          String
+  user            User          @relation(fields: [userId], references: [id])
+  turfId          String
+  turf            Turf          @relation(fields: [turfId], references: [id])
+  slotId          String        @unique
+  slot            TimeSlot      @relation(fields: [slotId], references: [id])
+  couponId        String?
+  coupon          Coupon?       @relation(fields: [couponId], references: [id])
+  date            DateTime
+  startTime       String
+  endTime         String
+  hours           Int           @default(1)
+  originalPrice   Float
+  discountAmount  Float         @default(0)
+  totalPrice      Float
+  status          BookingStatus @default(PENDING)
+  paymentId       String?
+  paymentOrderId  String?
+  paymentStatus   PaymentStatus @default(UNPAID)
+  ownerRevealed   Boolean       @default(false)
+  notes           String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([userId])
+  @@index([turfId])
+  @@index([status])
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  REFUNDED
+  FAILED
+}
+
+model ChatMessage {
+  id         String      @id @default(cuid())
+  userId     String?
+  user       User?       @relation(fields: [userId], references: [id])
+  sessionId  String
+  role       MessageRole
+  content    String
+  tokensUsed Int         @default(0)
+  createdAt  DateTime    @default(now())
+
+  @@index([userId, createdAt])
+  @@index([sessionId])
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+}
+
+model EmailLog {
+  id        String   @id @default(cuid())
+  to        String
+  subject   String
+  type      String
+  status    String   @default("SENT")
+  createdAt DateTime @default(now())
+}
