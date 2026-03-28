@@ -1,11 +1,12 @@
+// src/lib/agent.ts
 import Groq from 'groq-sdk';
 import { prisma } from './prisma';
 import { to12h, hoursInRange } from './timeUtils';
+import { BookingStatus } from '@prisma/client';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const MAX_HISTORY = 10;
 
-// Use any[] to avoid groq-sdk version type conflicts
 const tools: any[] = [
   { type:'function', function:{ name:'search_turfs', description:'Search available turfs by sport, city, max price per hour', parameters:{ type:'object', properties:{ sport:{type:'string',enum:['FOOTBALL','CRICKET','BASKETBALL']}, city:{type:'string',description:'City name'}, maxPrice:{type:'number',description:'Max price per hour in INR'} } } } },
   { type:'function', function:{ name:'get_turf_details', description:'Get full turf details and available time slots for a specific date', parameters:{ type:'object', properties:{ turfId:{type:'string'}, date:{type:'string',description:'YYYY-MM-DD'} }, required:['turfId'] } } },
@@ -15,100 +16,169 @@ const tools: any[] = [
   { type:'function', function:{ name:'get_faqs', description:'Get platform FAQs about rules, cancellation, payment policies', parameters:{ type:'object', properties:{} } } },
 ];
 
-async function executeTool(name: string, args: Record<string,unknown>): Promise<string> {
+async function executeTool(name: string, args: Record<string, unknown>): Promise<string> {
   try {
-    switch(name) {
+    switch (name) {
       case 'search_turfs': {
-        const where: Record<string,unknown> = { isActive:true };
-        if(args.sport)    where.sport        = { has: args.sport };
-        if(args.city)     where.city         = { contains: args.city as string, mode:'insensitive' };
-        if(args.maxPrice) where.pricePerHour = { lte: args.maxPrice };
-        const turfs = await prisma.turf.findMany({ where, take:6 });
-        if(!turfs.length) return 'No turfs found matching those criteria.';
-        return JSON.stringify(turfs.map(t=>({
-          id:t.id, name:t.name, city:t.city, location:t.location,
-          sport:t.sport, pricePerHour:t.pricePerHour,
-          amenities:t.amenities.slice(0,4), image:t.images[0]??null,
-          openTime:to12h(t.openTime), closeTime:to12h(t.closeTime)
+        const where: Record<string, unknown> = { isActive: true };
+        if (args.sport)    where.sport        = { has: args.sport };
+        if (args.city)     where.city         = { contains: args.city as string, mode: 'insensitive' };
+        if (args.maxPrice) where.pricePerHour = { lte: args.maxPrice };
+        const turfs = await prisma.turf.findMany({ where: where as any, take: 6 });
+        if (!turfs.length) return 'No turfs found matching those criteria.';
+        return JSON.stringify(turfs.map(t => ({
+          id: t.id, name: t.name, city: t.city, location: t.location,
+          sport: t.sport, pricePerHour: t.pricePerHour,
+          amenities: t.amenities.slice(0, 4), image: t.images[0] ?? null,
+          openTime: to12h(t.openTime), closeTime: to12h(t.closeTime),
         })));
       }
+
       case 'get_turf_details': {
-        const turf = await prisma.turf.findUnique({ where:{ id:args.turfId as string } });
-        if(!turf) return 'Turf not found.';
+        const turf = await prisma.turf.findUnique({ where: { id: args.turfId as string } });
+        if (!turf) return 'Turf not found.';
         let slots: unknown[] = [];
-        if(args.date) {
-          const date = new Date(args.date as string);
-          const booked = await prisma.timeSlot.findMany({ where:{ turfId:turf.id, date, isBooked:true }, select:{ startTime:true } });
-          const bookedSet = new Set(booked.map(s=>s.startTime));
+        if (args.date) {
+          const date   = new Date(args.date as string);
+          const booked = await prisma.timeSlot.findMany({ where: { turfId: turf.id, date, isBooked: true }, select: { startTime: true } });
+          const bookedSet = new Set(booked.map(s => s.startTime));
           const [oh] = turf.openTime.split(':').map(Number);
           const [ch] = turf.closeTime.split(':').map(Number);
-          for(let h=oh; h<ch; h++) {
-            const st = `${String(h).padStart(2,'0')}:00`;
-            slots.push({ time24:st, display:to12h(st), isBooked:bookedSet.has(st) });
+          for (let h = oh; h < ch; h++) {
+            const st = `${String(h).padStart(2, '0')}:00`;
+            slots.push({ time24: st, display: to12h(st), isBooked: bookedSet.has(st) });
           }
         }
-        return JSON.stringify({ id:turf.id, name:turf.name, description:turf.description, location:turf.location, city:turf.city, sport:turf.sport, pricePerHour:turf.pricePerHour, amenities:turf.amenities, openTime:to12h(turf.openTime), closeTime:to12h(turf.closeTime), availableSlots:slots });
+        return JSON.stringify({
+          id: turf.id, name: turf.name, description: turf.description,
+          location: turf.location, city: turf.city, sport: turf.sport,
+          pricePerHour: turf.pricePerHour, amenities: turf.amenities,
+          openTime: to12h(turf.openTime), closeTime: to12h(turf.closeTime),
+          availableSlots: slots,
+        });
       }
+
       case 'check_slot_availability': {
         const date  = new Date(args.date as string);
-        const hours = Number(args.hours)||1;
-        const turf  = await prisma.turf.findUnique({ where:{ id:args.turfId as string }, select:{ pricePerHour:true, name:true } });
-        if(!turf) return 'Turf not found.';
+        const hours = Number(args.hours) || 1;
+        const turf  = await prisma.turf.findUnique({ where: { id: args.turfId as string }, select: { pricePerHour: true, name: true } });
+        if (!turf) return 'Turf not found.';
         const subSlots = hoursInRange(args.startTime as string, hours);
-        const booked   = await prisma.timeSlot.findMany({ where:{ turfId:args.turfId as string, date, startTime:{ in:subSlots }, isBooked:true } });
-        const available = booked.length === 0;
-        const endH = parseInt((args.startTime as string).split(':')[0]) + hours;
-        const endTime = `${String(endH).padStart(2,'0')}:00`;
-        const totalPrice = turf.pricePerHour * hours;
-        return JSON.stringify({ available, turfName:turf.name, startDisplay:to12h(args.startTime as string), endDisplay:to12h(endTime), hours, totalPrice, pricePerHour:turf.pricePerHour });
-      }
-      case 'get_my_bookings': {
-        const bookings = await prisma.booking.findMany({
-          where:{ userId:args.userId as string, ...(args.status&&{status:args.status as string}) },
-          include:{ turf:{ select:{ name:true, city:true } } },
-          orderBy:{ createdAt:'desc' }, take:10
+        const booked   = await prisma.timeSlot.findMany({ where: { turfId: args.turfId as string, date, startTime: { in: subSlots }, isBooked: true } });
+        const endH     = parseInt((args.startTime as string).split(':')[0]) + hours;
+        const endTime  = `${String(endH).padStart(2, '0')}:00`;
+        return JSON.stringify({
+          available:    booked.length === 0,
+          turfName:     turf.name,
+          startDisplay: to12h(args.startTime as string),
+          endDisplay:   to12h(endTime),
+          hours,
+          totalPrice:   turf.pricePerHour * hours,
+          pricePerHour: turf.pricePerHour,
         });
-        if(!bookings.length) return 'No bookings found.';
-        return JSON.stringify(bookings.map(b=>({ id:b.id, turf:b.turf.name, city:b.turf.city, date:b.date.toISOString().split('T')[0], startTime:to12h(b.startTime), endTime:to12h(b.endTime), totalPrice:b.totalPrice, status:b.status, paymentStatus:b.paymentStatus })));
       }
+
+      case 'get_my_bookings': {
+        // ✅ FIX: cast status to BookingStatus enum so Prisma is happy
+        const statusValue = args.status
+          ? (args.status as string) as BookingStatus
+          : undefined;
+
+        const bookings = await prisma.booking.findMany({
+          where: {
+            userId: args.userId as string,
+            ...(statusValue && { status: statusValue }),
+          },
+          include: { turf: { select: { name: true, city: true } } },
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+        });
+        if (!bookings.length) return 'No bookings found.';
+        return JSON.stringify(bookings.map(b => ({
+          id:            b.id,
+          turf:          b.turf.name,
+          city:          b.turf.city,
+          date:          b.date.toISOString().split('T')[0],
+          startTime:     to12h(b.startTime),
+          endTime:       to12h(b.endTime),
+          totalPrice:    b.totalPrice,
+          status:        b.status,
+          paymentStatus: b.paymentStatus,
+        })));
+      }
+
       case 'initiate_booking': {
         const date  = new Date(args.date as string);
-        const hours = Number(args.hours)||1;
-        const turf  = await prisma.turf.findUnique({ where:{ id:args.turfId as string }, select:{ pricePerHour:true, name:true, ownerId:true } });
-        if(!turf) return 'Turf not found.';
+        const hours = Number(args.hours) || 1;
+        const turf  = await prisma.turf.findUnique({ where: { id: args.turfId as string }, select: { pricePerHour: true, name: true, ownerId: true } });
+        if (!turf) return 'Turf not found.';
 
-        // Check conflicts for all hours in range
         const subSlots  = hoursInRange(args.startTime as string, hours);
-        const conflicts = await prisma.timeSlot.findMany({ where:{ turfId:args.turfId as string, date, startTime:{ in:subSlots }, isBooked:true } });
-        if(conflicts.length) return JSON.stringify({ error:'Some slots in this time range are already booked. Please choose a different time.' });
+        const conflicts = await prisma.timeSlot.findMany({ where: { turfId: args.turfId as string, date, startTime: { in: subSlots }, isBooked: true } });
+        if (conflicts.length) return JSON.stringify({ error: 'Some slots in this range are already booked. Please choose a different time.' });
 
-        const endH    = parseInt((args.startTime as string).split(':')[0]) + hours;
-        const endTime = `${String(endH).padStart(2,'0')}:00`;
-        const totalPrice = turf.pricePerHour * hours; // FIXED: multiply by hours
+        const endH       = parseInt((args.startTime as string).split(':')[0]) + hours;
+        const endTime    = `${String(endH).padStart(2, '0')}:00`;
+        const totalPrice = turf.pricePerHour * hours;
 
-        // Create all sub-slots
         const slotRecs = await Promise.all(
-          subSlots.map((st,i) => prisma.timeSlot.create({ data:{ turfId:args.turfId as string, date, startTime:st, endTime:`${String(parseInt(st.split(':')[0])+1).padStart(2,'0')}:00`, isBooked:false } }))
+          subSlots.map(st => prisma.timeSlot.create({
+            data: { turfId: args.turfId as string, date, startTime: st, endTime: `${String(parseInt(st.split(':')[0]) + 1).padStart(2, '0')}:00`, isBooked: false },
+          }))
         );
 
-        // Main booking on first slot
         const booking = await prisma.booking.create({
-          data:{ userId:args.userId as string, turfId:args.turfId as string, slotId:slotRecs[0].id, date, startTime:args.startTime as string, endTime, totalPrice, status:'PENDING', paymentStatus:'UNPAID' }
+          data: {
+            userId:       args.userId as string,
+            turfId:       args.turfId as string,
+            slotId:       slotRecs[0].id,
+            date,
+            startTime:    args.startTime as string,
+            endTime,
+            hours,
+            originalPrice: totalPrice,
+            discountAmount: 0,
+            totalPrice,
+            status:       'PENDING',
+            paymentStatus: 'UNPAID',
+          },
         });
 
         console.log(`[BOOKING CREATED] ID:${booking.id} Turf:${turf.name} ${to12h(args.startTime as string)}-${to12h(endTime)} ${hours}hr ₹${totalPrice}`);
 
-        return JSON.stringify({ bookingId:booking.id, turfName:turf.name, date:args.date, startDisplay:to12h(args.startTime as string), endDisplay:to12h(endTime), hours, totalPrice, pricePerHour:turf.pricePerHour, paymentRequired:true });
+        return JSON.stringify({
+          bookingId:    booking.id,
+          turfName:     turf.name,
+          date:         args.date,
+          startDisplay: to12h(args.startTime as string),
+          endDisplay:   to12h(endTime),
+          hours,
+          totalPrice,
+          pricePerHour: turf.pricePerHour,
+          paymentRequired: true,
+        });
       }
+
       case 'get_faqs':
-        return JSON.stringify({ cancellation:'Free cancellation 24h before slot. No refund within 24h.', payment:'UPI, cards, netbanking via Razorpay. Full payment required to confirm booking.', rules:'Sports shoes mandatory. No alcohol on premises. Max 15 players per slot.', slots:'Book 1, 2, or 3 hour blocks. Just tell me how many hours you want.', contact:'support@turfbook.com' });
-      default: return 'Unknown tool.';
+        return JSON.stringify({
+          cancellation: 'Free cancellation 24h before slot. No refund within 24h.',
+          payment:      'UPI, cards, netbanking via Razorpay. Full payment required to confirm booking.',
+          rules:        'Sports shoes mandatory. No alcohol. Max 15 players per slot.',
+          slots:        'Book 1, 2, or 3 hour blocks. Just tell me how many hours you want.',
+          contact:      'support@turfbook.com',
+        });
+
+      default:
+        return 'Unknown tool.';
     }
-  } catch(err) { console.error('Tool error:',err); return `Error: ${err instanceof Error?err.message:'Unknown error'}`; }
+  } catch (err) {
+    console.error('Tool error:', err);
+    return `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
+  }
 }
 
-export interface ChatMessage { role:'user'|'assistant'; content:string; }
-export interface AgentResult { reply:string; inputTokens:number; outputTokens:number; totalTokens:number; }
+export interface ChatMessage { role: 'user' | 'assistant'; content: string; }
+export interface AgentResult  { reply: string; inputTokens: number; outputTokens: number; totalTokens: number; }
 
 export async function runAgent(messages: ChatMessage[], userId?: string): Promise<AgentResult> {
   const trimmed = messages.slice(-MAX_HISTORY);
@@ -138,37 +208,38 @@ RULES:
 - Use markdown for formatting`;
 
   const msgs: any[] = [
-    { role:'system', content:systemPrompt },
-    ...trimmed.map(m=>({ role:m.role, content:m.content })),
+    { role: 'system', content: systemPrompt },
+    ...trimmed.map(m => ({ role: m.role, content: m.content })),
   ];
 
-  let inputTokens = Math.ceil(msgs.map(m=>typeof m.content==='string'?m.content:'').join(' ').length/4);
+  let inputTokens = Math.ceil(msgs.map(m => typeof m.content === 'string' ? m.content : '').join(' ').length / 4);
 
-  for(let i=0; i<8; i++) {
+  for (let i = 0; i < 8; i++) {
     const res = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages: msgs,
+      model:        'llama-3.3-70b-versatile',
+      messages:     msgs,
       tools,
-      tool_choice: 'auto',
-      max_tokens: 1400,
-      temperature: 0.5,
+      tool_choice:  'auto' as any,
+      max_tokens:   1400,
+      temperature:  0.5,
     });
 
     const choice = res.choices[0];
     const msg    = choice.message;
-    if(res.usage) inputTokens = res.usage.prompt_tokens;
+    if (res.usage) inputTokens = res.usage.prompt_tokens;
     msgs.push(msg);
 
-    if(choice.finish_reason==='tool_calls' && msg.tool_calls) {
-      for(const tc of msg.tool_calls) {
+    if (choice.finish_reason === 'tool_calls' && msg.tool_calls) {
+      for (const tc of msg.tool_calls) {
         const result = await executeTool(tc.function.name, JSON.parse(tc.function.arguments));
-        msgs.push({ role:'tool', tool_call_id:tc.id, content:result });
+        msgs.push({ role: 'tool', tool_call_id: tc.id, content: result });
       }
     } else {
-      const outputText = msg.content || "Sorry, I couldn't process that. Please try again.";
-      const outputTokens = res.usage?.completion_tokens ?? Math.ceil(outputText.length/4);
-      return { reply:outputText, inputTokens, outputTokens, totalTokens:inputTokens+outputTokens };
+      const outputText   = msg.content || "Sorry, I couldn't process that. Please try again.";
+      const outputTokens = res.usage?.completion_tokens ?? Math.ceil(outputText.length / 4);
+      return { reply: outputText, inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
     }
   }
-  return { reply:'Processing limit reached. Please rephrase your question.', inputTokens, outputTokens:10, totalTokens:inputTokens+10 };
+
+  return { reply: 'Processing limit reached. Please rephrase your question.', inputTokens, outputTokens: 10, totalTokens: inputTokens + 10 };
 }
